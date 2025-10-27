@@ -1,0 +1,18 @@
+{
+  "author": "ForgedMC",
+  "description": "Instant piglin bartering for faster trades!",
+  "minecraft": "1.20",
+  "require": ["bolt"],
+  "data_pack": {
+    "name": "fast_barter",
+    "pack_format": 48,
+    "load": ["src"]
+  },
+  "pipeline": ["mecha"],
+  "output": "build",
+  "meta": {
+    "bolt": {
+      "entrypoint": "fast_barter:main"
+    }
+  }
+}

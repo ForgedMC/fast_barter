@@ -1,0 +1,9 @@
+function_tag minecraft:load {"values":["fast_barter:root/load"]}
+
+predicate fast_barter:bartering:
+    condition: "minecraft:entity_properties"
+    entity: "this"
+    predicate:
+        equipment:
+            offhand:
+                items: ["minecraft:gold_ingot"]
