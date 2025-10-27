@@ -28,23 +28,94 @@ jobs:
       - name: "Detect Datapack Name"
         id: detect
         run: |
-          cd build
-          PACK_DIR=$(find . -mindepth 1 -maxdepth 1 -type d | head -n1)
+          PACK_DIR=$(find build -mindepth 1 -maxdepth 1 -type d | head -n1)
+          if [ -z "$PACK_DIR" ]; then
+            echo "ERROR: Nenhum diretório de datapack encontrado em build/"
+            ls -la build || true
+            exit 1
+          fi
           PACK_NAME=$(basename "$PACK_DIR")
           echo "PACK_DIR=$PACK_DIR" >> $GITHUB_ENV
           echo "PACK_NAME=$PACK_NAME" >> $GITHUB_ENV
-          echo "Detected datapack: $PACK_NAME"
+          echo "Detected datapack: $PACK_NAME at $PACK_DIR"
+
+      - name: "Validate Datapack Output"
+        run: |
+          if [ ! -f "$PACK_DIR/pack.mcmeta" ]; then
+            echo "ERROR: $PACK_DIR/pack.mcmeta não encontrado."
+            ls -la "$PACK_DIR" || true
+            exit 1
+          fi
+          if [ ! -d "$PACK_DIR/data" ]; then
+            echo "ERROR: $PACK_DIR/data não encontrado."
+            ls -la "$PACK_DIR" || true
+            exit 1
+          fi
+          echo "Datapack parece válido:"
+          ls -la "$PACK_DIR"
 
       - name: "Prepare Version Metadata"
         id: version
         run: |
-          # exemplo de tag: 1.0.0-1.21-1.21.10
           TAG="${GITHUB_REF_NAME}"
           BASE_VERSION=$(echo "$TAG" | cut -d'-' -f1)
           MC_START=$(echo "$TAG" | cut -d'-' -f2)
           MC_END=$(echo "$TAG" | cut -d'-' -f3)
-          MC_RANGE="${MC_START}-${MC_END}"
 
+          expand_versions() {
+            start="$1"
+            end="$2"
+
+            if [ "$(echo "$start" | awk -F. '{print NF}')" -eq 2 ]; then
+              start="${start}.0"
+            fi
+
+            major_start=$(echo "$start" | cut -d. -f1)
+            minor_start=$(echo "$start" | cut -d. -f2)
+            patch_start=$(echo "$start" | cut -d. -f3)
+            
+            if [ "$(echo "$end" | awk -F. '{print NF}')" -eq 2 ]; then
+              end="${end}.0"
+            fi
+
+            major_end=$(echo "$end" | cut -d. -f1)
+            minor_end=$(echo "$end" | cut -d. -f2)
+            patch_end=$(echo "$end" | cut -d. -f3)
+
+            if [ "$major_start" != "$major_end" ] || [ "$minor_start" != "$minor_end" ]; then
+              echo "ERROR: Range de versões cruza minors diferentes (${major_start}.${minor_start} -> ${major_end}.${minor_end})."
+              echo "Suportado apenas ranges dentro do mesmo major.minor (ex: 1.21 -> 1.21.10)."
+              exit 1
+            fi
+
+            major="$major_start"
+            minor="$minor_start"
+
+            versions=()
+            for patch in $(seq "$patch_start" "$patch_end"); do
+              if [ "$patch" -eq 0 ]; then
+                versions+=("${major}.${minor}")
+              else
+                versions+=("${major}.${minor}.${patch}")
+              fi
+            done
+
+            printf '['
+            first=1
+            for v in "${versions[@]}"; do
+              if [ $first -eq 1 ]; then
+                first=0
+              else
+                printf ','
+              fi
+              printf '"%s"' "$v"
+            done
+            printf ']'
+          }
+
+          GAME_VERSIONS_JSON=$(expand_versions "$MC_START" "$MC_END")
+
+          MC_RANGE="${MC_START}-${MC_END}"
           FILE_SUFFIX="v.${BASE_VERSION}+${MC_RANGE}"
           FILE_SUFFIX_SAFE=$(echo "$FILE_SUFFIX" | tr '/' '-')
 
@@ -52,9 +123,10 @@ jobs:
           echo "MC_START=$MC_START" >> $GITHUB_ENV
           echo "MC_END=$MC_END" >> $GITHUB_ENV
           echo "FILE_SUFFIX=$FILE_SUFFIX_SAFE" >> $GITHUB_ENV
+          echo "GAME_VERSIONS_JSON=$GAME_VERSIONS_JSON" >> $GITHUB_ENV
 
           echo "Base: $BASE_VERSION"
-          echo "Range: $MC_RANGE"
+          echo "MC Versions: $GAME_VERSIONS_JSON"
 
       - name: "Create Mod from Datapack"
         run: |
@@ -66,10 +138,29 @@ jobs:
               return ''.join(c if c.isalnum() or c == '_' else '_' for c in name.lower()).strip('_') or 'pack'
 
           def create_fabric_json(mod_id, version, name, description):
-              return {"schemaVersion":1,"id":mod_id,"version":version,"name":name,"description":description,"license":"LicenseRef-Datapack","environment":"*","depends":{"fabric-resource-loader-v0":"*"}}
+              return {
+                  "schemaVersion": 1,
+                  "id": mod_id,
+                  "version": version,
+                  "name": name,
+                  "description": description,
+                  "license": "LicenseRef-Datapack",
+                  "environment": "*",
+                  "depends": {"fabric-resource-loader-v0": "*"}
+              }
 
           def create_quilt_json(mod_id, version, name, description):
-              return {"schema_version":1,"quilt_loader":{"group":"com.modrinth","id":mod_id,"version":version,"metadata":{"name":name,"description":description},"intermediate_mappings":"net.fabricmc:intermediary","depends":[{"id":"quilt_resource_loader","versions":"*","unless":"fabric-resource-loader-v0"}]}}
+              return {
+                  "schema_version": 1,
+                  "quilt_loader": {
+                      "group": "com.modrinth",
+                      "id": mod_id,
+                      "version": version,
+                      "metadata": {"name": name, "description": description},
+                      "intermediate_mappings": "net.fabricmc:intermediary",
+                      "depends": [{"id": "quilt_resource_loader", "versions": "*", "unless": "fabric-resource-loader-v0"}]
+                  }
+              }
 
           def create_forge_toml(mod_id, version, name, description):
               return f"""modLoader = 'lowcodefml'
@@ -87,7 +178,8 @@ jobs:
           mods = [{{ modId = '{mod_id}', version = '{version}', displayName = '{name}', description = "{description}", credits = 'Generated by DatapackConverter' }}]
           """
 
-          datapack_path = Path(os.getenv("PACK_DIR", "build/unknown")).resolve()
+          pack_dir = os.getenv("PACK_DIR", "build/unknown")
+          datapack_path = Path(pack_dir).resolve()
           mod_id = sanitize_id(os.getenv("PACK_NAME", "datapack"))
           mod_name = os.getenv("PACK_NAME", "Datapack")
           mod_version = os.getenv("BASE_VERSION", "1.0.0")
@@ -95,10 +187,16 @@ jobs:
           file_suffix = os.getenv("FILE_SUFFIX", "v.1.0.0")
           output_path = Path(f"{mod_name} {file_suffix}.jar")
 
+          print(f"[DEBUG] datapack_path = {datapack_path}")
+          print(f"[DEBUG] exists pack.mcmeta? {(datapack_path / 'pack.mcmeta').exists()}")
+          print(f"[DEBUG] data dir exists? {(datapack_path / 'data').exists()}")
+
           with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as jar:
-              for file in (datapack_path / "data").rglob("*"):
-                  if file.is_file():
-                      jar.write(file, f"data/{file.relative_to(datapack_path/'data')}")
+              data_root = datapack_path / "data"
+              if data_root.exists():
+                  for file in data_root.rglob("*"):
+                      if file.is_file():
+                          jar.write(file, f"data/{file.relative_to(data_root)}")
               mcmeta_file = datapack_path / "pack.mcmeta"
               if mcmeta_file.exists():
                   jar.write(mcmeta_file, "pack.mcmeta")
@@ -110,7 +208,6 @@ jobs:
 
       - name: "Zip Datapack"
         run: |
-          cd build
           cd "$PACK_DIR"
           zip -r "../../${PACK_NAME} ${FILE_SUFFIX}.zip" .
 
@@ -119,9 +216,7 @@ jobs:
         run: |
           DESCRIPTION="${{ github.event.release.body }}"
           DESCRIPTION_ESCAPED=$(echo "$DESCRIPTION" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-          GAME_VERSIONS_JSON="[\"${MC_START}\",\"${MC_END}\"]"
           echo "DESCRIPTION_ESCAPED=$DESCRIPTION_ESCAPED" >> $GITHUB_ENV
-          echo "GAME_VERSIONS_JSON=$GAME_VERSIONS_JSON" >> $GITHUB_ENV
 
       - name: "Publish Mod"
         env:
